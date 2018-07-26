@@ -36,7 +36,8 @@ class Record:
         """
         Gets a serialized data of this record.
         """
-        return [self.name, self.price, self.source, self.author, self.date]
+        return [self.name, self.price, self.source, self.author, self.date,
+                self.url]
 
 
 class PttRecord(Record):
@@ -90,18 +91,6 @@ class Crawler:
         """
         raise NotImplementedError
 
-    def read(self):
-        """
-        Reads the fetched content.
-        """
-        raise NotImplementedError
-
-    def save(self):
-        """
-        Saves the result into file.
-        """
-        raise NotImplementedError
-
 
 class PttCrawler(Crawler):
     """
@@ -109,14 +98,14 @@ class PttCrawler(Crawler):
     """
 
     URL_PREFIX = "http://www.ptt.cc"
-    INDEX_SUFFIX = "/index.html"
+    INDEX_SUFFIX = "/index979.html"
     PAGES = 5
 
-    SAVED_CSV = "records.csv"
+    SAVED_CSV = "records/%s.csv"
 
     class Cache:
         """
-        A disk cache controller for logging the last page fetched.
+        A disk cache controller for logging the next page to fetch.
         """
 
         CACHE_FILE = "cache"
@@ -124,35 +113,33 @@ class PttCrawler(Crawler):
         def __init__(self):
             if os.path.isfile(self.CACHE_FILE):
                 with open(self.CACHE_FILE) as fin:
-                    self.__last_page = int(fin.read().strip())
+                    self.__next_page = fin.read().strip()
             else:
-                self.__last_page = None
+                self.__next_page = None
 
-        def check_page(self, last_page):
+        def write_next_page(self, next_page):
             """
-            Check a page as done.
+            Writes the url of the next page into disk.
             """
-            self.__last_page = last_page
-            with open(self.CACHE_FILE) as fout:
-                fout.write("%d" % self.__last_page)
+            self.__next_page = next_page
+            with open(self.CACHE_FILE, "w") as fout:
+                fout.write("%s" % self.__next_page)
+
+        def read_next_page(self):
+            """
+            Reads the url of the next page from disk.
+            """
+            return self.__next_page
 
         @property
         def is_cached(self):
             """
             Returns true if there's any page had done.
             """
-            return self.__last_page is not None
-
-        @property
-        def next_page(self):
-            """
-            Returns the next page that should be fetched.
-            """
-            return self.__last_page - 1 if self.__last_page > 1 else None
+            return self.__next_page is not None
 
     def __init__(self, board_name):
         self.board_name = board_name
-        self.__records = []
         self.cache = self.Cache()
 
     def fetch(self):
@@ -160,31 +147,37 @@ class PttCrawler(Crawler):
         Download all posts of the given PTT board.
         """
 
-        url = self.URL_PREFIX + "/bbs/" + self.board_name + self.INDEX_SUFFIX
-        post_urls = queue.Queue()
+        # Gets the starting url
+        if self.cache.is_cached:
+            page_url = self.cache.read_next_page()
+        else:
+            page_url = self.URL_PREFIX + "/bbs/" + self.board_name + \
+                self.INDEX_SUFFIX
 
-        # Fetches post urls from each page
+        # Scans each page of this board
         for _ in range(self.PAGES):
-            next_page_url, page_post_urls = self.__fetch_page(url)
+
+            # Initializes a url queue for the posts of this page
+            post_urls = queue.Queue()
+            next_page_url, page_post_urls = self.__fetch_page_urls(page_url)
             while page_post_urls.qsize() > 0:
                 post_urls.put(page_post_urls.get())
-            url = self.URL_PREFIX + next_page_url
 
-        # Fetches each post
-        self.__records = []
-        while post_urls.qsize() > 0:
-            post_url = self.URL_PREFIX + post_urls.get()
-            try:
-                self.__records.append(self.__fetch_post(post_url))
-            except AttributeError:
-                print("Skipped, unable to parse")
-                continue
-            except PttRecordException as ptt_exception:
-                print("Skipped, ptt post error", ptt_exception)
-                continue
+            # Fetches the post contents of this page
+            page_records = self.__fetch_page_records(post_urls)
+
+            # Saves the records to disk
+            self.__save_page_records(page_records,
+                                     tag=self.__parge_page_tag(page_url))
+
+            # Gets the url for the next page
+            page_url = self.URL_PREFIX + next_page_url
+
+            # Caches the next page url
+            self.cache.write_next_page(page_url)
 
     @classmethod
-    def __fetch_page(cls, url):
+    def __fetch_page_urls(cls, url):
 
         dom = cls.__get_dom(url)
 
@@ -207,6 +200,24 @@ class PttCrawler(Crawler):
         return next_page_url, page_post_urls
 
     @classmethod
+    def __fetch_page_records(cls, post_urls):
+
+        # Fetches each post
+        page_records = []
+        while post_urls.qsize() > 0:
+            post_url = cls.URL_PREFIX + post_urls.get()
+            try:
+                page_records.append(cls.__fetch_post(post_url))
+            except AttributeError:
+                print("Skipped, unable to parse")
+                continue
+            except PttRecordException as ptt_exception:
+                print("Skipped, ptt post error", ptt_exception)
+                continue
+
+        return page_records
+
+    @classmethod
     def __fetch_post(cls, post_url):
         return PttRecord(cls.__get_dom(post_url), post_url)
 
@@ -216,14 +227,21 @@ class PttCrawler(Crawler):
         html = requests.get(url)
         return BeautifulSoup(html.text, 'html.parser')
 
-    def read(self):
-        return self.__records
+    @classmethod
+    def __save_page_records(cls, page_records, tag=""):
 
-    def save(self):
-        with open(self.SAVED_CSV, "w") as fout:
+        filename = cls.SAVED_CSV % tag if tag else cls.SAVED_CSV
+
+        with open(filename, "w") as fout:
             writer = csv.writer(fout)
-            for record in self.__records:
+            for record in page_records:
                 writer.writerow(record.serialized)
+
+        print("Saved %s" % filename)
+
+    @classmethod
+    def __parge_page_tag(cls, url):
+        return re.search("(\\d+).html", url).group(1)
 
 
 def main():
@@ -232,10 +250,6 @@ def main():
     """
     crawler = PttCrawler("photo-buy")
     crawler.fetch()
-    records = crawler.read()
-    for record in records:
-        print(record)
-    crawler.save()
 
 
 if __name__ == "__main__":
