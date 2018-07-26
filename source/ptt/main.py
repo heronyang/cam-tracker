@@ -8,6 +8,7 @@ camera market on PTT.
 import csv
 import re
 import queue as queue
+import os.path
 import requests
 from dateutil import parser
 from bs4 import BeautifulSoup
@@ -19,12 +20,13 @@ class Record:
     such as its price.
     """
 
-    def __init__(self, name, price, source, author, date):
+    def __init__(self, name, price, source, author, date, url):
         self.name = name
         self.price = price
         self.source = source
         self.author = author
         self.date = date
+        self.url = url
 
     def __str__(self):
         return "<%s %sNTD %s>" % (self.name, self.price, self.date)
@@ -42,7 +44,7 @@ class PttRecord(Record):
     A Ptt record of an used camera sold.
     """
 
-    def __init__(self, dom):
+    def __init__(self, dom, url):
 
         # Gets the header and the content of this post
         header = dom.select(".article-metaline .article-meta-value")
@@ -54,7 +56,7 @@ class PttRecord(Record):
         date = parser.parse(header[2].text)
         price = int(re.search("(\\d+00)", content).group(0))
 
-        Record.__init__(self, name, price, "ptt", author, date)
+        Record.__init__(self, name, price, "ptt", author, date, url)
 
     @classmethod
     def __format_name(cls, name):
@@ -112,9 +114,46 @@ class PttCrawler(Crawler):
 
     SAVED_CSV = "records.csv"
 
+    class Cache:
+        """
+        A disk cache controller for logging the last page fetched.
+        """
+
+        CACHE_FILE = "cache"
+
+        def __init__(self):
+            if os.path.isfile(self.CACHE_FILE):
+                with open(self.CACHE_FILE) as fin:
+                    self.__last_page = int(fin.read().strip())
+            else:
+                self.__last_page = None
+
+        def check_page(self, last_page):
+            """
+            Check a page as done.
+            """
+            self.__last_page = last_page
+            with open(self.CACHE_FILE) as fout:
+                fout.write("%d" % self.__last_page)
+
+        @property
+        def is_cached(self):
+            """
+            Returns true if there's any page had done.
+            """
+            return self.__last_page is not None
+
+        @property
+        def next_page(self):
+            """
+            Returns the next page that should be fetched.
+            """
+            return self.__last_page - 1 if self.__last_page > 1 else None
+
     def __init__(self, board_name):
         self.board_name = board_name
         self.__records = []
+        self.cache = self.Cache()
 
     def fetch(self):
         """
@@ -169,7 +208,7 @@ class PttCrawler(Crawler):
 
     @classmethod
     def __fetch_post(cls, post_url):
-        return PttRecord(cls.__get_dom(post_url))
+        return PttRecord(cls.__get_dom(post_url), post_url)
 
     @classmethod
     def __get_dom(cls, url):
