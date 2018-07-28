@@ -57,6 +57,9 @@ class PttRecord(Record):
         date = parser.parse(header[2].text)
         price = int(re.search("(\\d+00)", content).group(0))
 
+        if price == 0:
+            raise PttRecordException("Invalid price (%s)" % name)
+
         Record.__init__(self, name, price, "ptt", author, date, url)
 
     @classmethod
@@ -99,7 +102,7 @@ class PttCrawler(Crawler):
 
     URL_PREFIX = "http://www.ptt.cc"
     INDEX_SUFFIX = "/index979.html"
-    PAGES = 5
+    PAGES = 100
 
     SAVED_CSV = "records/%s.csv"
 
@@ -213,6 +216,9 @@ class PttCrawler(Crawler):
                 continue
             except PttRecordException as ptt_exception:
                 print("Skipped, ptt post error", ptt_exception)
+                continue
+            except Exception as exception:
+                print("Skipped, unseen exception", exception)
                 continue
 
         return page_records
